@@ -1,0 +1,92 @@
+name: Sync Public Subset
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_repository:
+        description: Public repository in owner/name format. Overrides repository variable when provided.
+        required: false
+        type: string
+      public_branch:
+        description: Public repository branch to push to. Overrides repository variable when provided.
+        required: false
+        default: main
+        type: string
+  push: {}
+
+permissions:
+  contents: read
+
+jobs:
+  sync-public-subset:
+    if: github.event_name == 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    env:
+      PUBLIC_REPOSITORY: ${{ inputs.public_repository || vars.PUBLIC_SYNC_REPOSITORY || 'pal-semiopen/life_management_open' }}
+      PUBLIC_BRANCH: ${{ inputs.public_branch || vars.PUBLIC_SYNC_BRANCH || 'main' }}
+      PLACEHOLDER_NAME: このパスには公開対象ファイルがありません.txt
+    steps:
+      - name: Validate workflow configuration
+        env:
+          PUBLIC_SYNC_TOKEN: ${{ secrets.PUBLIC_SYNC_TOKEN }}
+        run: |
+          if [ -z "$PUBLIC_REPOSITORY" ]; then
+            echo "PUBLIC_SYNC_REPOSITORY is not set. Configure a repository variable or pass workflow_dispatch input public_repository." >&2
+            exit 1
+          fi
+          if [ -z "$PUBLIC_SYNC_TOKEN" ]; then
+            echo "PUBLIC_SYNC_TOKEN secret is not set." >&2
+            exit 1
+          fi
+
+      - name: Show resolved sync target
+        run: |
+          echo "PUBLIC_REPOSITORY=$PUBLIC_REPOSITORY"
+          echo "PUBLIC_BRANCH=$PUBLIC_BRANCH"
+
+      - name: Checkout private repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Build public subset staging
+        run: |
+          python scripts/build_public_subset.py \
+            --root . \
+            --output-dir .public_staging \
+            --placeholder-name "$PLACEHOLDER_NAME"
+
+      - name: Checkout public repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.PUBLIC_REPOSITORY }}
+          ref: ${{ env.PUBLIC_BRANCH }}
+          token: ${{ secrets.PUBLIC_SYNC_TOKEN }}
+          path: .public_repo
+          fetch-depth: 1
+
+      - name: Replace public repository contents
+        shell: bash
+        run: |
+          find .public_repo -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          cp -R .public_staging/. .public_repo/
+
+      - name: Commit and push when changed
+        shell: bash
+        run: |
+          cd .public_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No public subset changes detected."
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "chore: sync public subset from ${GITHUB_REPOSITORY}@${GITHUB_SHA}"
+          git push origin "HEAD:${PUBLIC_BRANCH}"
